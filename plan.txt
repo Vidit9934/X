@@ -1,0 +1,117 @@
+AI TWITTER GROWTH COPILOT — BACKEND BUILD PLAN
+=================================================
+Source: requirements.txt (AI Twitter Growth Copilot — App Plan v2)
+Scope: THIS REPO IS BACKEND-ONLY. The Android frontend is a separate,
+external effort and is NOT tracked or pushed here.
+
+RULE: Work top to bottom. Do not start a stage until every item in the
+previous stage is checked off ([x]). Do not start an item in a stage
+until the items above it in that same stage are checked off.
+
+-------------------------------------------------------------------
+BACKEND STAGE 1 — MVP
+(FastAPI skeleton + data model + LLM pipeline, no live scraper yet)
+-------------------------------------------------------------------
+[x] Scaffold backend/ as a Python + FastAPI project (venv, requirements.txt/pyproject, app entrypoint, health-check route)
+[x] Connection config code for Supabase (env vars via pydantic-settings, no secrets committed) — see backend/app/config.py, backend/.env.example
+    [x] DONE: real Supabase project created, backend/.env filled with real SUPABASE_URL / SUPABASE_KEY (service_role key — required so server-side inserts bypass RLS; see Gotchas in CLAUDE.md)
+[x] Design Supabase schema (SQL written, see backend/app/schema.sql):
+    [x] style_profiles (creator style data extracted by DeepSeek)
+    [x] drafts (the 5 daily post drafts + image idea + source link + status)
+    [x] leads (bio/link clicks, DM/comment conversions, tagged to a draft/post)
+    [x] reader_accounts (pool bookkeeping: health/status, last-used, retired flag)
+    [x] DONE: schema.sql run against the real Supabase project, all 4 tables created
+[x] Build LLM client wrapper (auth, request/response handling, cost/token logging) — backend/app/services/openrouter.py
+    UPDATED: LLM is accessed via OpenRouter (not DeepSeek's own API). Model: deepseek/deepseek-v4-flash. Env vars: OPENROUTER_API_KEY, OPENROUTER_BASE_URL, LLM_MODEL.
+[x] Define scraper interface (abstract class/protocol) — backend/app/services/scraper.py — no real implementation yet, so twscrape can be swapped in later without touching callers
+[x] Build manual-trigger endpoint: trend-scan summary (accepts pasted-in tweet text instead of live scraping) — POST /trend-scan
+[x] Build manual-trigger endpoint: 5-draft generation (style profile + context + trend summary -> LLM -> 5 drafts w/ image idea + source link) — POST /drafts/generate
+[x] Build endpoint to list/fetch today's draft inbox (for a future frontend to consume) — GET /drafts/today
+
+    TESTING — STAGE 1:
+    [x] Unit tests: LLM client wrapper (mocked API responses, error handling) — backend/tests/test_openrouter_client.py
+    [x] Unit tests: Supabase schema CRUD helpers (style_profiles, drafts, leads, reader_accounts) — backend/tests/test_repositories.py (against an in-memory fake, see backend/tests/fakes.py — no live Supabase project exists yet)
+    [x] Integration test: manual-trigger endpoints end-to-end (paste sample tweets -> trend summary -> 5 drafts persisted -> fetchable via inbox endpoint) — backend/tests/test_endpoints.py
+    [x] All Stage 1 tests passing — 11/11 passed (pytest, Python 3.13 venv)
+
+[x] STAGE 1 COMPLETE (code + tests) — cross off before continuing
+    NOTE: the two [!] manual steps above (live Supabase project + running schema.sql) don't block Stage 2 coding but DO block any real (non-fake) end-to-end run. Do them whenever convenient before relying on real persistence. Also still pending: create/fund an OpenRouter account and put the real key in backend/.env (OPENROUTER_API_KEY).
+
+-------------------------------------------------------------------
+BACKEND STAGE 2 — AUTOMATION
+(Wire real scraping + scheduling + push, once reader accounts are aged)
+-------------------------------------------------------------------
+[x] Implement twscrape-backed scraper behind the Stage-1 interface — backend/app/services/twscrape_scraper.py (TwscrapeScraper; credentials via READER_ACCOUNTS_JSON env var, loaded into twscrape's own local sqlite pool, never Supabase)
+[x] Wire 2-3 reader accounts into rotation (twscrape's built-in multi-account rotation) — twscrape's AccountsPool rotates internally; backend/app/services/reader_pool.py (ReaderPoolManager) is the glue to our reader_accounts table
+[x] Add reader-account health monitoring (log login/session failures; mark account "retire" on failure/challenge, never "retry harder") — ReaderPoolManager.sync_health()
+[x] Add pacing logic: spread scraping across scheduled windows, no bursts — TwscrapeScraper sleeps SCRAPE_PACING_SECONDS between handles (see test_twscrape_scraper.py pacing test)
+[x] Add GitHub Actions scheduled workflows implementing the daily pipeline (section 7 of requirements.txt): .github/workflows/daily-pipeline.yml
+    [x] 9:00am trend + creator activity scrape trigger — POST /automation/trend-scan
+    [x] 9:15am draft generation trigger — same job, chained via jq (needs the 9:00 trend-scan output)
+    [x] 9:30am reply-target scan trigger — POST /automation/reply-target-scan (STUB: scrapes + returns raw posts, no scoring — real scoring is Stage 3)
+    [x] weekly style-profile refresh trigger — POST /automation/style-profile-refresh (real: scrapes + LLM-extracts + upserts style_profiles; this is Stage 1 feature 4A, built here)
+[x] Add Supabase keepalive ping (prevent free-tier pause after 7 days idle) — .github/workflows/keepalive.yml + GET /health/db
+[ ] Implement FCM push-sending (server-side dispatch only — morning check-in ping + 5 reminder-slot pings; assumes a client will register a device token later)
+    DEFERRED per user direction: no Android app exists yet to register device tokens against. Revisit once the frontend exists.
+[x] Implement morning check-in intake endpoint (accepts check-in text or records "no answer" -> triggers fallback context path) — POST /checkin, GET /checkin/today (backend/app/routers/checkin.py); new check_ins table in schema.sql. Fallback implemented is the simple path (no answer -> draft-generation gets a null check_in_text -> trend-based ideas only); no GitHub commit/diff integration (out of scope).
+
+    TESTING — STAGE 2:
+    [x] Unit tests: twscrape adapter (mocked), scraper-interface conformance — backend/tests/test_twscrape_scraper.py
+    [x] Unit tests: pacing/rotation logic and reader-account health-monitoring state transitions (healthy -> retire) — backend/tests/test_twscrape_scraper.py (pacing), backend/tests/test_reader_pool.py (health transitions)
+    [x] Integration test: one scheduled-workflow run at low volume against a staging reader account, confirm no burst pattern — backend/tests/test_automation_endpoints.py (fakes stand in for a staging reader account/live scrape; no real X account exists yet — see note below)
+    [ ] Integration test: FCM dispatch call fires correctly (mocked send) for check-in + reminder slots
+        DEFERRED along with FCM push-sending itself (see above).
+    [x] All Stage 2 tests passing (except the deferred FCM one) — 24/24 passing (11 Stage 1 + 13 new), pytest, Python 3.13 venv
+
+[ ] STAGE 2 COMPLETE — cross off before continuing
+    Everything is done except FCM push-sending + its test, deliberately deferred
+    (no Android app yet to register device tokens against — revisit once the
+    frontend exists, then check this box). Per this file's own top rule, Stage 3
+    should not formally start until that's done — but Stage 3's listed items
+    (reply-target scoring, style-profile refinement, lead tracking) don't depend
+    on FCM, so it's reasonable to begin drafting/starting those in the meantime.
+    NOTE: no real X reader accounts exist yet (Phase 0 account-aging from
+    requirements.txt section 9 hasn't happened) — all scraper/reader-pool code
+    is built and unit-tested against mocks, same as Stage 1 shipped
+    OpenRouter/Supabase code before real credentials existed. No live scrape has
+    run. Do a real end-to-end run once READER_ACCOUNTS_JSON has real, aged
+    account credentials and RENDER_BASE_URL/secrets are configured for the
+    GitHub Actions workflows.
+
+-------------------------------------------------------------------
+BACKEND STAGE 3 — INTELLIGENCE
+(Refinement loops, reply-target scoring, lead tracking)
+-------------------------------------------------------------------
+[ ] Build reply-target scoring endpoint: scan watchlist creators, score by engagement velocity, prioritize "someone has a real problem" posts over controversy (per section 4E)
+[ ] Add LLM (OpenRouter/deepseek-v4-flash) reply-angle suggestion generation for top 3-5 candidates/day
+[ ] Build style-profile refinement loop (compare generated drafts vs. actual creator style over time, adjust profile)
+[ ] Build lead-tracking ingestion endpoints (bio/link click events, DM/comment-to-lead tagging, tie back to originating post)
+[ ] Build reporting endpoint: which post type (of the 5) is converting to leads, not just likes
+[ ] Add reminder skip-rate tracking per slot (data only — self-tuning logic/UI is a frontend concern, backend just exposes the data)
+
+    TESTING — STAGE 3:
+    [ ] Unit tests: reply-target scoring logic (engagement velocity, "real problem" prioritization)
+    [ ] Unit tests: lead-ingestion endpoints (click events, DM/comment tagging)
+    [ ] Integration test: style-profile refresh loop against seeded creator data
+    [ ] Integration test: "which post type converts" reporting endpoint against seeded leads/drafts data
+    [ ] All Stage 3 tests passing
+
+[ ] STAGE 3 COMPLETE — cross off before continuing
+
+-------------------------------------------------------------------
+OPEN DECISIONS (informational — resolve when the relevant stage is reached)
+-------------------------------------------------------------------
+- Creator list split: which 15-30 creators for "style study" vs. "reply-target/bigger fish" watchlist? (affects Stage 1 seed data & Stage 3 scoring)
+- Should draft approval be required before a reminder notification fires, or should the reminder just open the raw draft? (affects Stage 2 push logic + Stage 1 draft status field)
+- Should the backend verify actual posting via the user's own timeline (streak tracking)? (affects Stage 3 reporting)
+- Precise definition of "lead" for tracking purposes — DM, profile click, specific reply keyword? (affects Stage 1 leads schema + Stage 3 ingestion)
+- Risk tolerance on reader-account aging timeline before ramping scrape volume (affects Stage 2 pacing defaults)
+
+-------------------------------------------------------------------
+OUT OF SCOPE FOR THIS REPO
+-------------------------------------------------------------------
+Android/Kotlin+Compose frontend (morning check-in UI, draft inbox, reminder
+notifications, reply-target feed, lead dashboard) — tracked and built
+separately, not pushed to this repository.
+
+

@@ -1,0 +1,156 @@
+# AI Twitter Growth Copilot — App Plan (v2)
+
+Personal-use Android app + server that studies small-but-strong AI/dev creators on X, plans your 5 daily posts around your actual building/blockers/discoveries, nudges you to post, and surfaces reply targets — all in service of one goal.
+
+**Primary goal: land international clients by sharing insight/knowledge — not just grow followers.** Everything below is tuned for that: the content mix includes a credibility-building post type, the reply-finder targets "someone with a real problem" over controversy, and the pipeline tracks leads, not just likes.
+
+**Stack constraint: free everywhere except the LLM.** Render + Supabase (free tiers) + DeepSeek API (the one paid line item) + your own scraping accounts instead of the official X API.
+
+## 1. Reality check on data access
+
+You're scraping X instead of paying for the official API (which dropped free/flat tiers in Feb 2026 — it's now $0.005/read, $0.015/post, no minimum spend). The two libraries that still work in 2026 — **twscrape** and **Twikit** — do it by logging in as a real X account and hitting internal endpoints, not through anything X sanctions.
+
+**Ban risk is real, not theoretical.** X ran a major bot purge from Oct 2025 through April 2026 (suspending accounts at a peak rate of ~208/minute) and now checks IP origin, device fingerprint, and "human touch" signals on every request. The community's own framing of these scraper libraries is "account-ban roulette" — expect a scraping account to have a lifespan measured in months, not to last forever. This is exactly why the account-pool design below exists.
+
+## 2. Reader account pool — the core risk-mitigation system
+
+This is the single most important operational habit in the whole plan: **treat scraping accounts as consumable, never as your identity.**
+
+- **Run a pool of 2-3 reader accounts, rotated by twscrape's built-in multi-account rotation.** Never scrape from, or even log into, your real posting account. Your posting/replying account only ever posts — it never touches the scraper.
+- **Age accounts before leaning on them.** At signup: real phone verification, a filled bio, a real (or at least non-default) profile photo. Purge-survivor data from 2026 shows accounts with phone verification predating Feb 2026, complete profiles, and 90+ days of age had materially lower suspension rates under similar scraping behavior than bare fresh signups. Practically: create all 2-3 accounts now, use them lightly (low query volume, normal-looking browsing) for the first couple weeks while they age, then ramp up to full pipeline volume.
+- **Always keep one account "in reserve"** — aging in the background, not under load — so when (not if) an active one gets flagged, you have a warmed-up replacement instead of a cold-start scramble.
+- **Pace requests, don't burst.** Spread the day's scraping across the scheduled windows (trend scan, reply-scan) rather than firing hundreds of reads in a few seconds — bursty patterns are a bigger red flag than raw volume at this scale.
+- **Monitor account health.** twscrape reports login/session failures per account; treat a failed session or challenge prompt as "retire this account," not "retry harder." Log it, stop routing traffic to it, and start warming its replacement.
+- **Proxies are optional but recommended, not required, at your volume.** Dedicated proxies per account reduce IP-correlation risk (all 3 accounts scraping from the same home IP is itself a signal), but they're the one place a small cost could creep in if you want them (~$5-10/mo for cheap residential proxies). Skip them to stay fully free — just know it's a small risk/cost trade you're accepting, worth revisiting if bans start happening fast.
+- **Budget the human overhead.** Setting up and aging 2-3 accounts (phone numbers, believable profiles, a warm-up period) is a real one-time chore, and you'll repeat a smaller version of it every few months as accounts get retired. Don't treat this as a "set once" step in the build plan — it's ongoing maintenance, on par with a dependency upgrade.
+
+## 3. High-level architecture
+
+```
+┌─────────────────────┐         ┌──────────────────────────────┐
+│   Android App         │◄──────►│   Server (Render free web svc)│
+│  (Kotlin/Compose)     │  HTTPS  │                               │
+│                       │         │  - Scraper svc (twscrape,     │
+│  - Morning check-in   │         │    2-3 reader accts, rotated) │
+│  - Post idea inbox    │         │  - LLM pipeline (DeepSeek)    │
+│  - Reminder/bell UI   │         │  - Style-profile store        │
+│  - Reply-target feed  │         │  - Lead/engagement tracking   │
+│  - Push via FCM        │◄──────│  - Notification dispatcher    │
+└─────────────────────┘         └──────────────────────────────┘
+         ▲                                    ▲
+         │                          ┌─────────┴─────────┐
+         │                          │  Supabase (free)    │
+         │                          │  Postgres + storage  │
+         └── FCM push ──────────────┤                       │
+                                    └───────────────────────┘
+                          ▲
+                 ┌────────┴─────────┐
+                 │ GitHub Actions     │  ← free scheduled cron,
+                 │ (scheduled cron)   │    triggers server jobs
+                 └────────────────────┘
+```
+
+## 4. Features
+
+### A. Creator style study (one-time + weekly refresh)
+Pick 15-30 "small but strong" AI/dev creators. A scheduled job (via the reader pool) pulls their recent posts, feeds them to DeepSeek to extract hook patterns, structure, tone, formatting habits — stored as a **style profile** (structured data, not copied text). Refresh weekly (or monthly if you want to cut cost/reader-account load further — see cost section).
+
+### B. Morning check-in
+Push notification (e.g. 8am): "Did you do anything interesting yesterday?" with a text field.
+- Answered → seeds the day's posts.
+- Left blank past a timeout → fallback to connected repo activity (commits/diffs) or straight to trend-based ideas with no personal context that day.
+
+### C. Daily trend scan → 5 post drafts
+After the check-in window, a job scrapes today's activity from your creator list + relevant AI topics, summarizes trends, then DeepSeek generates 5 drafts in your voice using: style profile + today's context + trend summary. Slot mix, tuned for client acquisition:
+
+1. Build-in-public update
+2. Blocker/lesson learned
+3. **Insight/mini case-study** — a specific problem you solved, framed so a non-technical decision-maker gets the value (the type most likely to read as "hire this person")
+4. Trend commentary
+5. Question-to-audience or a second build-in-public angle, whichever fits the day
+
+Each draft ships with an **image idea** and a source link where relevant.
+
+### D. Posting reminders ("rings a bell")
+5 notification slots. Since the audience you want is international, set slots around *their* peak hours (US/Europe business/active hours), not just your convenient local time. Each notification opens straight to that slot's draft. Track post-vs-skip per slot and let the app suggest better times after a couple weeks.
+
+### E. Reply-target finder
+Scrapes a watchlist of bigger creators (reader pool again), scores recent posts by engagement velocity, and flags candidates. Tuned for client acquisition: instead of chasing controversy, flag posts where **someone has a real problem you can solve** — a founder venting about a technical issue, a "how do I..." thread, a "looking for someone who can..." post. A sharp, correct reply there reads as expertise to anyone watching, including the OP. Surfaces 3-5 candidates/day with a suggested angle from DeepSeek. You write and post the reply yourself, from your real account.
+
+### F. Lead tracking
+Track bio/link-in-bio clicks and log any DM/comment that turns into a real conversation, tagged to the post that triggered it. This is the metric that actually matters for the client-acquisition goal — tells you which of the 5 post types is converting, not just which gets likes.
+
+## 5. Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Mobile | Kotlin + Jetpack Compose | Native Android, free, WorkManager/AlarmManager for reliable backgrounded reminders |
+| Push | Firebase Cloud Messaging | Free, reliable server→app notifications |
+| Backend | Python + FastAPI on Render free web service | Free; spins down after 15 min idle (30-60s cold start) — fine since jobs are scheduled, not instant-user-facing |
+| Scheduler | GitHub Actions scheduled workflows | Free cron, triggers the Render endpoint on schedule |
+| Scraper | twscrape, abstracted behind an interface, pool of 2-3 reader accounts | Free; actively maintained as of Aug 2026; interface makes it swappable when X breaks internals again; pool + rotation per section 2 |
+| LLM | DeepSeek API (V4-Flash) | Only paid piece, and cheap for this workload — see cost estimate |
+| DB | Supabase Postgres (free tier: 500MB, pauses after 7 days idle) | Style profiles, post history, scrape cache, lead/engagement tracking; daily jobs keep it from pausing |
+
+## 6. Estimated cost
+
+**DeepSeek (the only required cost):** off-peak rates $0.22/1M input tokens, $0.66/1M output (peak = weekday 01:00-04:00 & 06:00-10:00 UTC, 2x; everything else off-peak).
+
+| Job | Frequency | Input tokens | Output tokens |
+|---|---|---|---|
+| Trend scan summary | Daily | ~20,000 | ~500 |
+| 5 draft generation | Daily | ~5,000 | ~1,200 |
+| Reply-target scoring | Daily | ~1,500 | ~400 |
+| Reply-angle suggestions | Daily | ~1,500 | ~600 |
+| Style-profile refresh | Weekly (amortized/day) | ~21,400 | ~430 |
+| **Total/day** | | **~49,400** | **~3,130** |
+
+**≈ $0.013/day, under $1/month.** Plus a free 5M-token signup grant (30 days) makes month one essentially free.
+
+**If you ever switch to the official API for reads instead of scraping** (e.g., to reduce ban risk on the highest-value job): trend scan + reply-scan + weekly refresh at $0.005/read comes to **~$59/month** for reads alone — 40-100x the DeepSeek-only cost, which is the real reason scraping is worth the ban-management overhead here. A cheaper middle ground if bans become frequent: keep scraping for daily trend/reply-scan, pay for official API only on the weekly style-profile refresh (~$32/month alone, or ~$8/month if you drop that refresh to monthly).
+
+**Free-tier operational gotchas (not costs, reliability quirks):**
+- Render free web service cold-starts after 15 min idle — fine for scheduled jobs, don't rely on it for anything instant.
+- Supabase free Postgres pauses after 7 days with zero requests — your daily jobs prevent this; add a cheap GitHub Actions keepalive ping if you go idle a week+.
+
+## 7. Daily automated pipeline
+
+```
+8:00am  → Push: morning check-in question
+8:30am  → (if no answer) fallback context pulled
+9:00am  → Reader pool scrapes trend + creator activity for today
+9:15am  → DeepSeek generates 5 drafts + image ideas → saved to app inbox
+9:30am  → Reader pool scans reply-target candidates, flags 3-5
+All day → 5 reminder pings at audience-timezone-aware slots, each opens a draft
+Weekly  → Style-profile refresh (or monthly, to cut reader-account load/cost)
+Ongoing → Monitor reader account health; rotate in reserve account on any flag/challenge
+```
+
+## 8. Risks & mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Reader account gets banned/challenged | Pool of 2-3, one always warming in reserve; never shared with posting account; retire on first sign of trouble rather than pushing through it (section 2) |
+| Scraper breaks when X changes internals | Abstract scraper behind an interface; budget a few hours/quarter for maintenance; watch twscrape's GitHub |
+| Generated posts sound generic/AI-ish | Re-tune style profile often; always require your edit before posting, never auto-post |
+| Notification fatigue → you ignore the bell | Make reminder times user-adjustable early; track skip rate and self-tune |
+| Legal/ToS exposure from scraping | Accepted for personal use; official API is a fallback if the account-management overhead ever outweighs the ~$59/month cost |
+| Free-tier reliability (Render cold starts, Supabase pausing) | Design jobs as scheduled/async, never user-facing-instant; keepalive ping if idle a week+ |
+
+## 9. Build phases
+
+**Phase 0 — Account groundwork (before any code, ~2 weeks):** Create the 2-3 reader accounts now. Fill in bios/photos, verify phones, let them sit and age with light, human-looking activity. This is on the critical path — don't start automation until these have had time to look like real accounts.
+
+**Phase 1 — MVP (2-3 weeks, can overlap Phase 0):** Backend skeleton on Render, manual trigger of trend-scan + draft generation (paste in tweets manually at first to test the LLM pipeline without touching the reader accounts yet), basic Android app showing draft inbox, no notifications yet.
+
+**Phase 2 — Automation (2-3 weeks):** Wire up twscrape with the aged reader pool, automate the daily pipeline via GitHub Actions cron hitting the Render endpoint, add FCM push for check-in + 5 reminders, start light/low-volume to keep pacing safe.
+
+**Phase 3 — Intelligence (ongoing):** Style-profile refinement loop, reply-target scoring, lead tracking feeding back into what's working, self-tuning reminder times, account-pool health monitoring and periodic replacement.
+
+## 10. Open questions for you
+
+- Which 15-30 creators go on your "study" list, and which go on your "reply-target/bigger fish" list?
+- Do you want drafts to require your edit+approve before the reminder even fires, or should the reminder just open the raw draft?
+- Should the app track whether you actually posted (via checking your own timeline) to build a real "did I post today" streak?
+- What counts as a "lead" for tracking purposes — a DM, a profile click, a specific keyword in a reply? Worth defining early so section 4F is measuring the right thing from day one.
+- Are you comfortable spending the ~2 weeks aging reader accounts before automation goes live, or do you want to start lighter/faster and accept higher early ban risk?

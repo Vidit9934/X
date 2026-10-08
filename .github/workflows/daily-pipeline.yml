@@ -1,0 +1,58 @@
+name: Daily pipeline
+
+on:
+  schedule:
+    # Times are UTC; requirements.txt's 9:00/9:15/9:30am are treated as the
+    # server's local schedule intent, expressed here in UTC.
+    - cron: "0 9 * * *"   # 9:00 — trend scan + draft generation
+    - cron: "30 9 * * *"  # 9:30 — reply-target scan (stub, see Stage 3)
+    - cron: "0 9 * * 1"   # weekly (Monday) — style-profile refresh
+  workflow_dispatch: {}
+
+jobs:
+  trend-and-drafts:
+    if: github.event.schedule == '0 9 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm the free-tier service
+        run: curl -sf "${{ secrets.RENDER_BASE_URL }}/health"
+
+      - name: Run automated trend scan
+        id: trend_scan
+        run: |
+          summary=$(curl -sf -X POST "${{ secrets.RENDER_BASE_URL }}/automation/trend-scan" \
+            -H "Content-Type: application/json" | jq -r .summary)
+          echo "summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$summary" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch today's check-in
+        id: checkin
+        run: |
+          text=$(curl -sf "${{ secrets.RENDER_BASE_URL }}/checkin/today" | jq -r .text)
+          echo "text<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$text" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Generate today's 5 drafts
+        run: |
+          jq -n \
+            --arg summary "${{ steps.trend_scan.outputs.summary }}" \
+            --arg checkin "${{ steps.checkin.outputs.text }}" \
+            '{trend_summary: $summary, check_in_text: (if $checkin == "null" then null else $checkin end)}' \
+          | curl -sf -X POST "${{ secrets.RENDER_BASE_URL }}/drafts/generate" \
+              -H "Content-Type: application/json" -d @-
+
+  reply-target-scan:
+    if: github.event.schedule == '30 9 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run reply-target scan (Stage 2 stub — no scoring yet)
+        run: curl -sf -X POST "${{ secrets.RENDER_BASE_URL }}/automation/reply-target-scan"
+
+  style-profile-refresh:
+    if: github.event.schedule == '0 9 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refresh creator style profiles
+        run: curl -sf -X POST "${{ secrets.RENDER_BASE_URL }}/automation/style-profile-refresh"

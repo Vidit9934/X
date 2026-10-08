@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.13.5
+pydantic-settings==2.7.1
+supabase==2.31.0
+httpx==0.28.1
+python-dotenv==1.0.1
+twscrape==0.17
+
+# testing
+pytest==8.3.4
+pytest-asyncio==0.25.2
+pytest-mock==3.14.0
